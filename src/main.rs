@@ -88,6 +88,15 @@ fn actualizar_tarea(id: i32, completada: bool) -> SqlResult<()> {
     Ok(())
 }
 
+fn agregar_tarea(descripcion: &str) -> SqlResult<()> {
+    let conn = Connection::open("tareas.db")?;
+    conn.execute(
+        "INSERT INTO tareas (descripcion) VALUES (?1)",
+        [descripcion],
+    )?;
+    Ok(())
+}
+
 struct TodoItem {
     id: i32,
     text: String,
@@ -96,12 +105,16 @@ struct TodoItem {
 
 struct MyApp {
     todos: Vec<TodoItem>,
+    nueva_tarea: String,
 }
 
 impl Default for MyApp {
     fn default() -> Self {
         let todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
-        Self { todos }
+        Self { 
+            todos,
+            nueva_tarea: String::new(),
+        }
     }
 }
 
@@ -109,6 +122,35 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("📋 Lista de Tareas - SQLite");
+            
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(10.0);
+            
+            // Sección para agregar nueva tarea
+            ui.horizontal(|ui| {
+                ui.label("Nueva tarea:");
+                let text_edit = ui.text_edit_singleline(&mut self.nueva_tarea);
+                
+                // Detectar Enter para agregar tarea
+                if text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if !self.nueva_tarea.trim().is_empty() {
+                        if agregar_tarea(&self.nueva_tarea).is_ok() {
+                            self.nueva_tarea.clear();
+                            self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
+                        }
+                    }
+                }
+                
+                if ui.button("➕ Agregar").clicked() {
+                    if !self.nueva_tarea.trim().is_empty() {
+                        if agregar_tarea(&self.nueva_tarea).is_ok() {
+                            self.nueva_tarea.clear();
+                            self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
+                        }
+                    }
+                }
+            });
             
             ui.add_space(10.0);
             ui.separator();
