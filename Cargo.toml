@@ -1,0 +1,9 @@
+[package]
+name = "my_project"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["wgpu", "wayland"] }
+egui = "0.29"
+rusqlite = { version = "0.32", features = ["bundled"] }
