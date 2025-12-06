@@ -9,7 +9,9 @@ fn main() -> Result<(), eframe::Error> {
     init_database().expect("Error al inicializar la base de datos");
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 500.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([500.0, 200.0])
+            .with_min_inner_size([400.0, 150.0]),
         ..Default::default()
     };
 
@@ -22,6 +24,9 @@ fn main() -> Result<(), eframe::Error> {
 }
 
 fn app_creator(cc: &eframe::CreationContext<'_>) -> Box<dyn eframe::App> {
+    // Establecer tema oscuro
+    cc.egui_ctx.set_visuals(egui::Visuals::dark());
+    
     let mut style = (*cc.egui_ctx.style()).clone();
     style.text_styles = [
         (
@@ -246,14 +251,30 @@ impl MyApp {
         let mut should_delete = false;
         
         let item_id = egui::Id::new("task").with(idx);
+        let hover_id = egui::Id::new("task_hover").with(idx);
+        let is_being_dragged = self.drag_index == Some(idx);
         
-        // Frame para la tarea
-        let frame_response = egui::Frame::none()
-            .inner_margin(egui::Margin::same(4.0))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    // Ícono de arrastre
-                    let drag_icon = ui.label("☰");
+        // Frame con fondo para la tarea - colores para tema oscuro
+        let frame = if is_being_dragged {
+            egui::Frame::none()
+                .fill(Color32::from_rgba_unmultiplied(70, 130, 180, 80))
+                .stroke(Stroke::new(2.0, Color32::from_rgb(100, 200, 255)))
+                .rounding(5.0)
+                .inner_margin(egui::Margin::same(6.0))
+        } else {
+            egui::Frame::none()
+                .fill(Color32::from_gray(40))
+                .rounding(5.0)
+                .inner_margin(egui::Margin::same(6.0))
+        };
+        
+        let frame_response = frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // Ícono de arrastre más visible
+                ui.vertical(|ui| {
+                    ui.add_space(2.0);
+                    let drag_label = egui::RichText::new("⣿").size(18.0).color(Color32::from_gray(150));
+                    let drag_icon = ui.label(drag_label);
                     
                     // Detectar drag en el ícono
                     let sense = egui::Sense::click_and_drag();
@@ -263,44 +284,59 @@ impl MyApp {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                     }
                     
+                    if drag_response.drag_started() {
+                        self.drag_index = Some(idx);
+                    }
+                    
                     if drag_response.dragged() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                        self.drag_index = Some(idx);
-                        
-                        // Feedback visual
-                        ui.painter().rect_stroke(
-                            ui.max_rect(),
-                            3.0,
-                            Stroke::new(2.0, Color32::from_rgb(100, 149, 237)),
-                        );
                     }
-                    
-                    // Checkbox con texto ajustable
-                    let todo = self.todo_at_mut(idx);
-                    let checked_before = todo.checked;
-                    
-                    ui.checkbox(&mut todo.checked, "");
-                    ui.label(&todo.text);
-                    
-                    if checked_before != todo.checked {
-                        let _ = actualizar_tarea(todo.id, todo.checked);
-                    }
-                    
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        should_delete = self.render_task_controls(ui, idx);
-                    });
+                });
+                
+                ui.add_space(4.0);
+                
+                // Checkbox con texto ajustable
+                let todo = self.todo_at_mut(idx);
+                let checked_before = todo.checked;
+                
+                ui.checkbox(&mut todo.checked, "");
+                ui.label(&todo.text);
+                
+                if checked_before != todo.checked {
+                    let _ = actualizar_tarea(todo.id, todo.checked);
+                }
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    should_delete = self.render_task_controls(ui, idx);
                 });
             });
+        });
         
-        // Detectar hover para reordenar
+        // Guardar la posición del rect para detección en tiempo real
+        ui.ctx().memory_mut(|mem| {
+            mem.data.insert_temp(hover_id, frame_response.response.rect);
+        });
+        
+        // Detectar hover para reordenar con línea más visible y zona de drop
         if let Some(drag_idx) = self.drag_index {
             if frame_response.response.hovered() && drag_idx != idx {
-                // Dibujar indicador de drop
                 let rect = frame_response.response.rect;
-                ui.painter().hline(
-                    rect.x_range(),
-                    rect.top(),
-                    Stroke::new(2.0, Color32::from_rgb(100, 149, 237)),
+                
+                // Fondo semitransparente para toda el área de drop
+                ui.painter().rect_filled(
+                    rect,
+                    5.0,
+                    Color32::from_rgba_unmultiplied(100, 200, 255, 30),
+                );
+                
+                // Línea indicadora de posición de drop más gruesa y visible
+                ui.painter().rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(rect.left(), rect.top() - 3.0),
+                        egui::vec2(rect.width(), 6.0),
+                    ),
+                    3.0,
+                    Color32::from_rgb(100, 200, 255),
                 );
             }
         }
@@ -353,32 +389,43 @@ impl MyApp {
 
     fn render_tasks(&mut self, ui: &mut egui::Ui) {
         let mut tarea_a_eliminar: Option<usize> = None;
-        let mut drop_target: Option<usize> = None;
+        let mut hover_target: Option<usize> = None;
 
         for idx in 0..self.todos.len() {
             if self.render_task_item(ui, idx) {
                 tarea_a_eliminar = Some(idx);
             }
-            
-            // Detectar drop target
-            if self.drag_index.is_some() {
-                if ui.input(|i| i.pointer.any_released()) {
-                    if ui.ui_contains_pointer() {
-                        drop_target = Some(idx);
+        }
+        
+        // Detectar sobre qué tarea está el cursor mientras arrastra
+        if let Some(drag_idx) = self.drag_index {
+            for idx in 0..self.todos.len() {
+                // Obtener el rect de la tarea
+                let task_hover_id = egui::Id::new("task_hover").with(idx);
+                if let Some(rect) = ui.ctx().memory(|mem| mem.data.get_temp::<egui::Rect>(task_hover_id)) {
+                    if let Some(hover_pos) = ui.input(|i| i.pointer.hover_pos()) {
+                        if rect.contains(hover_pos) {
+                            hover_target = Some(idx);
+                            break;
+                        }
                     }
                 }
             }
-        }
-        
-        // Procesar reordenamiento
-        if let (Some(from_idx), Some(to_idx)) = (self.drag_index, drop_target) {
-            if from_idx != to_idx {
-                let item = self.todos.remove(from_idx);
-                self.todos.insert(to_idx, item);
+            
+            // Mover en tiempo real si hay hover sobre otra tarea
+            if let Some(target_idx) = hover_target {
+                if drag_idx != target_idx {
+                    let item = self.todos.remove(drag_idx);
+                    self.todos.insert(target_idx, item);
+                    // Actualizar el índice de drag a la nueva posición
+                    self.drag_index = Some(target_idx);
+                }
             }
-            self.drag_index = None;
-        } else if ui.input(|i| i.pointer.any_released()) {
-            self.drag_index = None;
+            
+            // Liberar cuando se suelta el mouse
+            if ui.input(|i| i.pointer.any_released()) {
+                self.drag_index = None;
+            }
         }
 
         if let Some(idx) = tarea_a_eliminar {
@@ -412,6 +459,8 @@ impl MyApp {
         if ui.button("🔄 Recargar tareas").clicked() {
             self.reload_tasks();
         }
+
+        ui.add_space(30.0);
     }
 
     fn reload_tasks(&mut self) {
@@ -429,19 +478,41 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.request_repaint();
+        
+        // Calcular altura necesaria basada en número de tareas
+        let num_tareas = self.todos.len();
+        let task_height = 40.0; // Altura aproximada por tarea
+        let header_height = 100.0; // Header + agregar tarea
+        let stats_height = 150.0; // Estadísticas + botón recargar
+        let needed_height = header_height + (num_tareas as f32 * task_height) + stats_height;
+        
+        // Ajustar tamaño de ventana automáticamente
+        let min_height = 200.0;
+        let max_height = 700.0;
+        let target_height = needed_height.clamp(min_height, max_height);
+        
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(500.0, target_height)));
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.render_header(ui);
-            self.render_add_task(ui);
-            
-            // ScrollArea para las tareas
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    ui.set_min_height(0.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().inner_margin(egui::Margin::same(8.0)))
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                
+                self.render_header(ui);
+                self.render_add_task(ui);
+                
+                // Usar ScrollArea solo si excede la altura máxima
+                if needed_height > max_height {
+                    egui::ScrollArea::vertical()
+                        .max_height(max_height - header_height - stats_height)
+                        .show(ui, |ui| {
+                            self.render_tasks(ui);
+                        });
+                } else {
                     self.render_tasks(ui);
-                    self.render_statistics(ui);
-                });
-        });
+                }
+                
+                self.render_statistics(ui);
+            });
     }
 }
