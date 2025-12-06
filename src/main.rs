@@ -1,4 +1,5 @@
 use eframe::egui::Ui;
+use egui::{FontFamily, FontId, TextStyle};
 use rusqlite::{Connection, Result as SqlResult};
 use std::time::Instant;
 
@@ -15,8 +16,36 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         HEADING,
         options,
-        Box::new(|_cc| Ok(Box::<MyApp>::default())),
+        // Box::new(|_cc| Ok(Box::<MyApp>::default())),
+        Box::new(|cc| Ok(app_creator(cc))),
     )
+}
+
+fn app_creator(cc: &eframe::CreationContext<'_>) -> Box<dyn eframe::App> {
+    let mut style = (*cc.egui_ctx.style()).clone();
+    style.text_styles = [
+        (
+            TextStyle::Heading,
+            FontId::new(24.0, FontFamily::Proportional),
+        ),
+        (TextStyle::Body, FontId::new(16.0, FontFamily::Proportional)),
+        (
+            TextStyle::Button,
+            FontId::new(16.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Small,
+            FontId::new(12.0, FontFamily::Proportional),
+        ),
+        (
+            TextStyle::Monospace,
+            FontId::new(14.0, FontFamily::Monospace),
+        ),
+    ]
+    .into();
+    cc.egui_ctx.set_style(style);
+
+    Box::<MyApp>::default()
 }
 
 fn init_database() -> SqlResult<()> {
