@@ -1,22 +1,19 @@
-use eframe::egui;
+use eframe::egui::Ui;
 use rusqlite::{Connection, Result as SqlResult};
 use std::time::Instant;
-use rodio::{Decoder, OutputStream, Sink};
-use std::fs::File;
-use std::io::BufReader;
-use std::sync::mpsc::{self, Sender};
+
+const HEADING: &str = "📋 Lista de Tareas";
 
 fn main() -> Result<(), eframe::Error> {
-    // Inicializar la base de datos
     init_database().expect("Error al inicializar la base de datos");
-    
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 400.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 500.0]),
         ..Default::default()
     };
-    
+
     eframe::run_native(
-        "Lista de Tareas - SQLite",
+        HEADING,
         options,
         Box::new(|_cc| Ok(Box::<MyApp>::default())),
     )
@@ -24,8 +21,7 @@ fn main() -> Result<(), eframe::Error> {
 
 fn init_database() -> SqlResult<()> {
     let conn = Connection::open("tareas.db")?;
-    
-    // Crear tabla si no existe
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tareas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,14 +31,10 @@ fn init_database() -> SqlResult<()> {
         )",
         [],
     )?;
-    
+
     // Verificar si ya hay datos
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tareas",
-        [],
-        |row| row.get(0),
-    )?;
-    
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tareas", [], |row| row.get(0))?;
+
     // Si no hay datos, insertar tareas de ejemplo
     if count == 0 {
         let tareas_ejemplo = vec![
@@ -57,22 +49,20 @@ fn init_database() -> SqlResult<()> {
             "Estudiar Rust y egui",
             "Backup de archivos importantes",
         ];
-        
+
         for tarea in tareas_ejemplo {
-            conn.execute(
-                "INSERT INTO tareas (descripcion) VALUES (?1)",
-                [tarea],
-            )?;
+            conn.execute("INSERT INTO tareas (descripcion) VALUES (?1)", [tarea])?;
         }
     }
-    
+
     Ok(())
 }
 
 fn cargar_tareas() -> SqlResult<Vec<TodoItem>> {
     let conn = Connection::open("tareas.db")?;
-    let mut stmt = conn.prepare("SELECT id, descripcion, completada, tiempo_acumulado FROM tareas")?;
-    
+    let mut stmt =
+        conn.prepare("SELECT id, descripcion, completada, tiempo_acumulado FROM tareas")?;
+
     let tareas = stmt.query_map([], |row| {
         Ok(TodoItem {
             id: row.get(0)?,
@@ -82,7 +72,7 @@ fn cargar_tareas() -> SqlResult<Vec<TodoItem>> {
             temporizador: None,
         })
     })?;
-    
+
     Ok(tareas.filter_map(|t| t.ok()).collect())
 }
 
@@ -122,15 +112,50 @@ fn actualizar_tiempo(id: i32, tiempo: i32) -> SqlResult<()> {
 struct Timer {
     inicio: Instant,
     activo: bool,
-    stop_sender: Option<Sender<()>>,
 }
 
 struct TodoItem {
     id: i32,
     text: String,
     checked: bool,
-    tiempo_acumulado: i32, // en segundos
+    tiempo_acumulado: i32,
     temporizador: Option<Timer>,
+}
+
+impl TodoItem {
+    fn tiempo_total(&self) -> i32 {
+        if let Some(ref timer) = self.temporizador {
+            if timer.activo {
+                return self.tiempo_acumulado + timer.inicio.elapsed().as_secs() as i32;
+            }
+        }
+        self.tiempo_acumulado
+    }
+
+    fn temporizador_activo(&self) -> bool {
+        self.temporizador.as_ref().map_or(false, |t| t.activo)
+    }
+
+    fn pausar_temporizador(&mut self) {
+        if let Some(ref timer) = self.temporizador {
+            self.tiempo_acumulado += timer.inicio.elapsed().as_secs() as i32;
+            let _ = actualizar_tiempo(self.id, self.tiempo_acumulado);
+        }
+        self.temporizador = None;
+    }
+
+    fn iniciar_temporizador(&mut self) {
+        self.temporizador = Some(Timer {
+            inicio: Instant::now(),
+            activo: true,
+        });
+    }
+
+    fn resetear_temporizador(&mut self) {
+        self.tiempo_acumulado = 0;
+        self.temporizador = None;
+        let _ = actualizar_tiempo(self.id, 0);
+    }
 }
 
 struct MyApp {
@@ -141,207 +166,181 @@ struct MyApp {
 impl Default for MyApp {
     fn default() -> Self {
         let todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
-        Self { 
+        Self {
             todos,
             nueva_tarea: String::new(),
         }
     }
 }
 
+impl MyApp {
+    fn todo_at(&self, idx: usize) -> &TodoItem {
+        &self.todos[idx]
+    }
+
+    fn todo_at_mut(&mut self, idx: usize) -> &mut TodoItem {
+        &mut self.todos[idx]
+    }
+
+    fn render_header(&self, ui: &mut egui::Ui) {
+        ui.heading(HEADING);
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+    }
+
+    fn render_add_task(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Nueva tarea:");
+            let text_edit = ui.text_edit_singleline(&mut self.nueva_tarea);
+
+            let should_add = (text_edit.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                || ui.button("➕ Agregar").clicked();
+
+            if should_add && !self.nueva_tarea.trim().is_empty() {
+                if agregar_tarea(&self.nueva_tarea).is_ok() {
+                    self.nueva_tarea.clear();
+                    self.reload_tasks();
+                }
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(10.0);
+    }
+
+    fn render_task_item(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
+        let mut should_delete = false;
+
+        ui.horizontal(|ui| {
+            self.render_task_checkbox(ui, idx);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                should_delete = self.render_task_controls(ui, idx);
+            });
+        });
+        ui.add_space(5.0);
+
+        should_delete
+    }
+
+    fn render_task_checkbox(&mut self, ui: &mut egui::Ui, idx: usize) {
+        let todo = self.todo_at_mut(idx);
+        let checked_before = todo.checked;
+        ui.checkbox(&mut todo.checked, &todo.text);
+
+        if checked_before != todo.checked {
+            let _ = actualizar_tarea(todo.id, todo.checked);
+        }
+    }
+
+    fn render_task_controls(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
+        let mut should_delete = false;
+
+        if ui.button("🗑").clicked() {
+            should_delete = true;
+        }
+
+        self.render_timer_display(ui, idx);
+        self.render_timer_controls(ui, idx);
+
+        if ui.button("🔄").clicked() {
+            let todo = self.todo_at_mut(idx);
+            todo.resetear_temporizador();
+        }
+
+        should_delete
+    }
+
+    fn render_timer_display(&self, ui: &mut Ui, idx: usize) {
+        let todo = self.todo_at(idx);
+        let tiempo_total = todo.tiempo_total();
+        let horas = tiempo_total / 3600;
+        let minutos = (tiempo_total % 3600) / 60;
+        let segundos = tiempo_total % 60;
+
+        ui.label(format!("⏱ {:02}:{:02}:{:02}", horas, minutos, segundos));
+    }
+
+    fn render_timer_controls(&mut self, ui: &mut Ui, idx: usize) {
+        let todo = self.todo_at_mut(idx);
+        if todo.temporizador_activo() {
+            if ui.button("⏸").clicked() {
+                todo.pausar_temporizador();
+            }
+        } else {
+            if ui.button("▶").clicked() {
+                todo.iniciar_temporizador();
+            }
+        }
+    }
+
+    fn render_tasks(&mut self, ui: &mut egui::Ui) {
+        let mut tarea_a_eliminar: Option<usize> = None;
+
+        for idx in 0..self.todos.len() {
+            if self.render_task_item(ui, idx) {
+                tarea_a_eliminar = Some(idx);
+            }
+        }
+
+        if let Some(idx) = tarea_a_eliminar {
+            self.delete_task(idx);
+        }
+    }
+
+    fn render_statistics(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(20.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        let tiempo_total_segundos: i32 = self.todos.iter().map(|t| t.tiempo_total()).sum();
+
+        let horas_total = tiempo_total_segundos / 3600;
+        let minutos_total = (tiempo_total_segundos % 3600) / 60;
+        let segundos_total = tiempo_total_segundos % 60;
+
+        let total = self.todos.len();
+        let completed = self.todos.iter().filter(|t| t.checked).count();
+        let pending = total - completed;
+
+        ui.label(format!("📊 Total: {}", total));
+        ui.label(format!("✅ Completadas: {}", completed));
+        ui.label(format!("⏳ Pendientes: {}", pending));
+        ui.label(format!(
+            "⏱️ Tiempo total: {:02}:{:02}:{:02}",
+            horas_total, minutos_total, segundos_total
+        ));
+
+        ui.add_space(10.0);
+
+        if ui.button("🔄 Recargar tareas").clicked() {
+            self.reload_tasks();
+        }
+    }
+
+    fn reload_tasks(&mut self) {
+        self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
+    }
+
+    fn delete_task(&mut self, idx: usize) {
+        let tarea_id = self.todos[idx].id;
+        if eliminar_tarea(tarea_id).is_ok() {
+            self.todos.remove(idx);
+        }
+    }
+}
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Solicitar repintado continuo para actualizar los temporizadores
         ctx.request_repaint();
-        
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("📋 Lista de Tareas - SQLite");
-            
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-            
-            // Sección para agregar nueva tarea
-            ui.horizontal(|ui| {
-                ui.label("Nueva tarea:");
-                let text_edit = ui.text_edit_singleline(&mut self.nueva_tarea);
-                
-                // Detectar Enter para agregar tarea
-                if text_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if !self.nueva_tarea.trim().is_empty() {
-                        if agregar_tarea(&self.nueva_tarea).is_ok() {
-                            self.nueva_tarea.clear();
-                            self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
-                        }
-                    }
-                }
-                
-                if ui.button("➕ Agregar").clicked() {
-                    if !self.nueva_tarea.trim().is_empty() {
-                        if agregar_tarea(&self.nueva_tarea).is_ok() {
-                            self.nueva_tarea.clear();
-                            self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
-                        }
-                    }
-                }
-            });
-            
-            ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-            
-            // Mostrar cada tarea de la base de datos como checkbox con temporizador y botón eliminar
-            let mut tarea_a_eliminar: Option<usize> = None;
-            
-            for (idx, todo) in self.todos.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    // Checkbox
-                    let checked_before = todo.checked;
-                    ui.checkbox(&mut todo.checked, &todo.text);
-                    
-                    // Si cambió el estado, actualizar en la base de datos
-                    if checked_before != todo.checked {
-                        let _ = actualizar_tarea(todo.id, todo.checked);
-                    }
-                    
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Botón eliminar
-                        if ui.button("🗑").clicked() {
-                            tarea_a_eliminar = Some(idx);
-                        }
-                        
-                        // Temporizador
-                        let tiempo_total = if let Some(ref timer) = todo.temporizador {
-                            if timer.activo {
-                                todo.tiempo_acumulado + timer.inicio.elapsed().as_secs() as i32
-                            } else {
-                                todo.tiempo_acumulado
-                            }
-                        } else {
-                            todo.tiempo_acumulado
-                        };
-                        
-                        let horas = tiempo_total / 3600;
-                        let minutos = (tiempo_total % 3600) / 60;
-                        let segundos = tiempo_total % 60;
-                        
-                        ui.label(format!("⏱ {:02}:{:02}:{:02}", horas, minutos, segundos));
-                        
-                        // Botón Start/Pause
-                        let temporizador_activo = todo.temporizador.as_ref().map_or(false, |t| t.activo);
-                        
-                        if temporizador_activo {
-                            if ui.button("⏸ Pausar").clicked() {
-                                if let Some(ref timer) = todo.temporizador {
-                                    // Acumular el tiempo transcurrido
-                                    todo.tiempo_acumulado += timer.inicio.elapsed().as_secs() as i32;
-                                    let _ = actualizar_tiempo(todo.id, todo.tiempo_acumulado);
-                                    
-                                    // Enviar señal para detener el audio
-                                    if let Some(ref sender) = timer.stop_sender {
-                                        let _ = sender.send(());
-                                    }
-                                }
-                                todo.temporizador = None;
-                            }
-                        } else {
-                            if ui.button("▶ Iniciar").clicked() {
-                                // Crear canal para detener el audio
-                                let (tx, rx) = mpsc::channel();
-                                
-                                // Reproducir sonido al iniciar en un hilo separado
-                                std::thread::spawn(move || {
-                                    if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
-                                        if let Ok(file) = File::open("data/sound.mp3") {
-                                            let buf_reader = BufReader::new(file);
-                                            if let Ok(source) = Decoder::new(buf_reader) {
-                                                if let Ok(sink) = Sink::try_new(&stream_handle) {
-                                                    sink.append(source);
-                                                    
-                                                    // Esperar señal de stop o que termine el audio
-                                                    loop {
-                                                        // Verificar si recibimos señal de stop
-                                                        if rx.try_recv().is_ok() {
-                                                            sink.stop();
-                                                            break;
-                                                        }
-                                                        
-                                                        // Verificar si el audio terminó
-                                                        if sink.empty() {
-                                                            break;
-                                                        }
-                                                        
-                                                        std::thread::sleep(std::time::Duration::from_millis(100));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
-                                
-                                todo.temporizador = Some(Timer {
-                                    inicio: Instant::now(),
-                                    activo: true,
-                                    stop_sender: Some(tx),
-                                });
-                            }
-                        }
-                        
-                        // Botón Reset
-                        if ui.button("🔄").clicked() {
-                            todo.tiempo_acumulado = 0;
-                            todo.temporizador = None;
-                            let _ = actualizar_tiempo(todo.id, 0);
-                        }
-                    });
-                });
-                ui.add_space(5.0);
-            }
-            
-            // Eliminar tarea si se marcó para eliminación
-            if let Some(idx) = tarea_a_eliminar {
-                let tarea_id = self.todos[idx].id;
-                if eliminar_tarea(tarea_id).is_ok() {
-                    self.todos.remove(idx);
-                }
-            }
-            
-            ui.add_space(20.0);
-            ui.separator();
-            ui.add_space(10.0);
-            
-            // Calcular tiempo total de todas las tareas
-            let tiempo_total_segundos: i32 = self.todos.iter().map(|t| {
-                if let Some(ref timer) = t.temporizador {
-                    if timer.activo {
-                        t.tiempo_acumulado + timer.inicio.elapsed().as_secs() as i32
-                    } else {
-                        t.tiempo_acumulado
-                    }
-                } else {
-                    t.tiempo_acumulado
-                }
-            }).sum();
-            
-            let horas_total = tiempo_total_segundos / 3600;
-            let minutos_total = (tiempo_total_segundos % 3600) / 60;
-            let segundos_total = tiempo_total_segundos % 60;
-            
-            // Estadísticas
-            let total = self.todos.len();
-            let completed = self.todos.iter().filter(|t| t.checked).count();
-            let pending = total - completed;
-            
-            ui.label(format!("📊 Total: {}", total));
-            ui.label(format!("✅ Completadas: {}", completed));
-            ui.label(format!("⏳ Pendientes: {}", pending));
-            ui.label(format!("⏱️ Tiempo total: {:02}:{:02}:{:02}", horas_total, minutos_total, segundos_total));
-            
-            ui.add_space(10.0);
-            
-            // Botón para recargar tareas
-            if ui.button("🔄 Recargar tareas").clicked() {
-                self.todos = cargar_tareas().unwrap_or_else(|_| Vec::new());
-            }
+            self.render_header(ui);
+            self.render_add_task(ui);
+            self.render_tasks(ui);
+            self.render_statistics(ui);
         });
     }
 }
