@@ -1,5 +1,5 @@
 use eframe::egui::Ui;
-use egui::{FontFamily, FontId, TextStyle};
+use egui::{FontFamily, FontId, TextStyle, Color32, Stroke};
 use rusqlite::{Connection, Result as SqlResult};
 use std::time::Instant;
 
@@ -190,6 +190,7 @@ impl TodoItem {
 struct MyApp {
     todos: Vec<TodoItem>,
     nueva_tarea: String,
+    drag_index: Option<usize>,
 }
 
 impl Default for MyApp {
@@ -198,6 +199,7 @@ impl Default for MyApp {
         Self {
             todos,
             nueva_tarea: String::new(),
+            drag_index: None,
         }
     }
 }
@@ -213,9 +215,9 @@ impl MyApp {
 
     fn render_header(&self, ui: &mut egui::Ui) {
         ui.heading(HEADING);
-        ui.add_space(10.0);
+        ui.add_space(5.0);
         ui.separator();
-        ui.add_space(10.0);
+        ui.add_space(5.0);
     }
 
     fn render_add_task(&mut self, ui: &mut egui::Ui) {
@@ -235,33 +237,77 @@ impl MyApp {
             }
         });
 
-        ui.add_space(10.0);
+        ui.add_space(5.0);
         ui.separator();
-        ui.add_space(10.0);
+        ui.add_space(5.0);
     }
 
     fn render_task_item(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut should_delete = false;
-
-        ui.horizontal(|ui| {
-            self.render_task_checkbox(ui, idx);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                should_delete = self.render_task_controls(ui, idx);
+        
+        let item_id = egui::Id::new("task").with(idx);
+        
+        // Frame para la tarea
+        let frame_response = egui::Frame::none()
+            .inner_margin(egui::Margin::same(4.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    // Ícono de arrastre
+                    let drag_icon = ui.label("☰");
+                    
+                    // Detectar drag en el ícono
+                    let sense = egui::Sense::click_and_drag();
+                    let drag_response = ui.interact(drag_icon.rect, item_id, sense);
+                    
+                    if drag_response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    }
+                    
+                    if drag_response.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        self.drag_index = Some(idx);
+                        
+                        // Feedback visual
+                        ui.painter().rect_stroke(
+                            ui.max_rect(),
+                            3.0,
+                            Stroke::new(2.0, Color32::from_rgb(100, 149, 237)),
+                        );
+                    }
+                    
+                    // Checkbox con texto ajustable
+                    let todo = self.todo_at_mut(idx);
+                    let checked_before = todo.checked;
+                    
+                    ui.checkbox(&mut todo.checked, "");
+                    ui.label(&todo.text);
+                    
+                    if checked_before != todo.checked {
+                        let _ = actualizar_tarea(todo.id, todo.checked);
+                    }
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        should_delete = self.render_task_controls(ui, idx);
+                    });
+                });
             });
-        });
-        ui.add_space(5.0);
+        
+        // Detectar hover para reordenar
+        if let Some(drag_idx) = self.drag_index {
+            if frame_response.response.hovered() && drag_idx != idx {
+                // Dibujar indicador de drop
+                let rect = frame_response.response.rect;
+                ui.painter().hline(
+                    rect.x_range(),
+                    rect.top(),
+                    Stroke::new(2.0, Color32::from_rgb(100, 149, 237)),
+                );
+            }
+        }
+        
+        ui.add_space(3.0);
 
         should_delete
-    }
-
-    fn render_task_checkbox(&mut self, ui: &mut egui::Ui, idx: usize) {
-        let todo = self.todo_at_mut(idx);
-        let checked_before = todo.checked;
-        ui.checkbox(&mut todo.checked, &todo.text);
-
-        if checked_before != todo.checked {
-            let _ = actualizar_tarea(todo.id, todo.checked);
-        }
     }
 
     fn render_task_controls(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
@@ -307,11 +353,32 @@ impl MyApp {
 
     fn render_tasks(&mut self, ui: &mut egui::Ui) {
         let mut tarea_a_eliminar: Option<usize> = None;
+        let mut drop_target: Option<usize> = None;
 
         for idx in 0..self.todos.len() {
             if self.render_task_item(ui, idx) {
                 tarea_a_eliminar = Some(idx);
             }
+            
+            // Detectar drop target
+            if self.drag_index.is_some() {
+                if ui.input(|i| i.pointer.any_released()) {
+                    if ui.ui_contains_pointer() {
+                        drop_target = Some(idx);
+                    }
+                }
+            }
+        }
+        
+        // Procesar reordenamiento
+        if let (Some(from_idx), Some(to_idx)) = (self.drag_index, drop_target) {
+            if from_idx != to_idx {
+                let item = self.todos.remove(from_idx);
+                self.todos.insert(to_idx, item);
+            }
+            self.drag_index = None;
+        } else if ui.input(|i| i.pointer.any_released()) {
+            self.drag_index = None;
         }
 
         if let Some(idx) = tarea_a_eliminar {
@@ -320,9 +387,9 @@ impl MyApp {
     }
 
     fn render_statistics(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(20.0);
-        ui.separator();
         ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(5.0);
 
         let tiempo_total_segundos: i32 = self.todos.iter().map(|t| t.tiempo_total()).sum();
 
@@ -341,8 +408,6 @@ impl MyApp {
             "⏱️ Tiempo total: {:02}:{:02}:{:02}",
             horas_total, minutos_total, segundos_total
         ));
-
-        ui.add_space(10.0);
 
         if ui.button("🔄 Recargar tareas").clicked() {
             self.reload_tasks();
@@ -368,8 +433,15 @@ impl eframe::App for MyApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_header(ui);
             self.render_add_task(ui);
-            self.render_tasks(ui);
-            self.render_statistics(ui);
+            
+            // ScrollArea para las tareas
+            egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.set_min_height(0.0);
+                    self.render_tasks(ui);
+                    self.render_statistics(ui);
+                });
         });
     }
 }
