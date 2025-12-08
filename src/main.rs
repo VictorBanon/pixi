@@ -143,6 +143,15 @@ fn actualizar_tiempo(id: i32, tiempo: i32) -> SqlResult<()> {
     Ok(())
 }
 
+fn actualizar_descripcion(id: i32, descripcion: &str) -> SqlResult<()> {
+    let conn = Connection::open("tareas.db")?;
+    conn.execute(
+        "UPDATE tareas SET descripcion = ?1 WHERE id = ?2",
+        [descripcion, &id.to_string()],
+    )?;
+    Ok(())
+}
+
 struct Timer {
     inicio: Instant,
     activo: bool,
@@ -196,6 +205,8 @@ struct MyApp {
     todos: Vec<TodoItem>,
     nueva_tarea: String,
     drag_index: Option<usize>,
+    editing_index: Option<usize>,
+    edit_text: String,
 }
 
 impl Default for MyApp {
@@ -205,6 +216,8 @@ impl Default for MyApp {
             todos,
             nueva_tarea: String::new(),
             drag_index: None,
+            editing_index: None,
+            edit_text: String::new(),
         }
     }
 }
@@ -253,12 +266,20 @@ impl MyApp {
         let item_id = egui::Id::new("task").with(idx);
         let hover_id = egui::Id::new("task_hover").with(idx);
         let is_being_dragged = self.drag_index == Some(idx);
+        let is_editing = self.editing_index == Some(idx);
+        let timer_active = self.todo_at(idx).temporizador_activo();
         
         // Frame con fondo para la tarea - colores para tema oscuro
         let frame = if is_being_dragged {
             egui::Frame::none()
                 .fill(Color32::from_rgba_unmultiplied(70, 130, 180, 80))
                 .stroke(Stroke::new(2.0, Color32::from_rgb(100, 200, 255)))
+                .rounding(5.0)
+                .inner_margin(egui::Margin::same(6.0))
+        } else if timer_active {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(40, 60, 40))
+                .stroke(Stroke::new(1.5, Color32::from_rgb(100, 200, 100)))
                 .rounding(5.0)
                 .inner_margin(egui::Margin::same(6.0))
         } else {
@@ -270,45 +291,72 @@ impl MyApp {
         
         let frame_response = frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Ícono de arrastre más visible
-                ui.vertical(|ui| {
-                    ui.add_space(2.0);
-                    let drag_label = egui::RichText::new("⣿").size(18.0).color(Color32::from_gray(150));
-                    let drag_icon = ui.label(drag_label);
+                // Ícono de arrastre más visible (solo si no está editando)
+                if !is_editing {
+                    ui.vertical(|ui| {
+                        ui.add_space(2.0);
+                        let drag_label = egui::RichText::new("⣿").size(18.0).color(Color32::from_gray(150));
+                        let drag_icon = ui.label(drag_label);
+                        
+                        // Detectar drag en el ícono
+                        let sense = egui::Sense::click_and_drag();
+                        let drag_response = ui.interact(drag_icon.rect, item_id, sense);
+                        
+                        if drag_response.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                        }
+                        
+                        if drag_response.drag_started() {
+                            self.drag_index = Some(idx);
+                        }
+                        
+                        if drag_response.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                    });
                     
-                    // Detectar drag en el ícono
-                    let sense = egui::Sense::click_and_drag();
-                    let drag_response = ui.interact(drag_icon.rect, item_id, sense);
-                    
-                    if drag_response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                    }
-                    
-                    if drag_response.drag_started() {
-                        self.drag_index = Some(idx);
-                    }
-                    
-                    if drag_response.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                    }
-                });
-                
-                ui.add_space(4.0);
-                
-                // Checkbox con texto ajustable
-                let todo = self.todo_at_mut(idx);
-                let checked_before = todo.checked;
-                
-                ui.checkbox(&mut todo.checked, "");
-                ui.label(&todo.text);
-                
-                if checked_before != todo.checked {
-                    let _ = actualizar_tarea(todo.id, todo.checked);
+                    ui.add_space(4.0);
                 }
                 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    should_delete = self.render_task_controls(ui, idx);
-                });
+                if is_editing {
+                    // Modo edición
+                    let should_save = ui.button("💾").clicked();
+                    let should_cancel = ui.button("❌").clicked();
+                    ui.text_edit_singleline(&mut self.edit_text);
+                    
+                    if should_save {
+                        let new_text = self.edit_text.clone();
+                        if !new_text.trim().is_empty() {
+                            let todo = self.todo_at_mut(idx);
+                            let todo_id = todo.id;
+                            if actualizar_descripcion(todo_id, &new_text).is_ok() {
+                                todo.text = new_text;
+                            }
+                            self.editing_index = None;
+                            self.edit_text.clear();
+                        }
+                    }
+                    
+                    if should_cancel {
+                        self.editing_index = None;
+                        self.edit_text.clear();
+                    }
+                } else {
+                    // Modo normal
+                    let todo = self.todo_at_mut(idx);
+                    let checked_before = todo.checked;
+                    
+                    ui.checkbox(&mut todo.checked, "");
+                    ui.label(&todo.text);
+                    
+                    if checked_before != todo.checked {
+                        let _ = actualizar_tarea(todo.id, todo.checked);
+                    }
+                    
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        should_delete = self.render_task_controls(ui, idx);
+                    });
+                }
             });
         });
         
@@ -348,6 +396,12 @@ impl MyApp {
 
     fn render_task_controls(&mut self, ui: &mut egui::Ui, idx: usize) -> bool {
         let mut should_delete = false;
+
+        if ui.button("✏️").clicked() {
+            let todo = self.todo_at(idx);
+            self.edit_text = todo.text.clone();
+            self.editing_index = Some(idx);
+        }
 
         if ui.button("🗑").clicked() {
             should_delete = true;
